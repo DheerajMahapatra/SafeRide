@@ -1,0 +1,30 @@
+{
+  "name": "dps_temp",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "@expo/vector-icons": "^15.0.2",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@supabase/supabase-js": "^2.112.3",
+    "expo": "~57.0.16",
+    "expo-clipboard": "~57.0.1",
+    "expo-constants": "~57.0.14",
+    "expo-font": "~57.0.1",
+    "expo-location": "~57.0.13",
+    "expo-notifications": "~57.0.14",
+    "expo-status-bar": "~57.0.1",
+    "expo-task-manager": "~57.0.13",
+    "firebase": "^12.18.0",
+    "react": "19.2.3",
+    "react-native": "0.86.2",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-svg": "15.15.4",
+    "react-native-webview": "13.16.1"
+  },
+  "devDependencies": {
+    "@expo/ngrok": "^4.1.3",
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  },
+  "private": true
+}
