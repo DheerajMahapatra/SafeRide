@@ -1,6 +1,6 @@
--- SafeRide Supabase setup (NO-AUTH VERSION)
+-- SafeRide Supabase setup (CLEAN RESET)
 -- Run this entire script in Supabase Dashboard -> SQL Editor -> New query.
--- This drops and recreates the tables, so it is safe to re-run from scratch.
+-- WARNING: This drops ALL existing tables and recreates them from scratch.
 
 create extension if not exists "pgcrypto";
 
@@ -10,12 +10,11 @@ drop table if exists public.alerts cascade;
 drop table if exists public.trips cascade;
 drop table if exists public.users cascade;
 
--- No foreign key to auth.users anymore: the app never calls supabase.auth.
--- Each device generates its own random id locally on first launch and
--- keeps using it forever (like a permanent "Share Code" identity).
+-- Users table: one row per device/user. Name is UNIQUE so the same person
+-- always gets the same row when they re-install the app.
 create table public.users (
   id uuid primary key,
-  name text,
+  name text not null unique,
   role text not null default 'driver' check (role in ('driver','guardian')),
   short_id text unique,
   push_token text,
@@ -24,7 +23,8 @@ create table public.users (
   latest_location jsonb,
   speed integer not null default 0,
   status text not null default 'SAFE',
-  route_points jsonb not null default '[]'::jsonb
+  route_points jsonb not null default '[]'::jsonb,
+  tracking_active boolean not null default false
 );
 
 create table public.trips (
@@ -33,8 +33,16 @@ create table public.trips (
   date date not null,
   points jsonb not null default '[]'::jsonb,
   distance_km double precision not null default 0,
-  duration_min integer not null default 0,
+  duration_sec integer not null default 0,
   max_speed integer not null default 0,
+  avg_speed integer not null default 0,
+  alerts_count integer not null default 0,
+  started_at timestamptz,
+  ended_at timestamptz,
+  tracking_status text not null default 'completed' check (tracking_status in ('active','completed','interrupted')),
+  start_location text,
+  end_location text,
+  guardian_notified boolean not null default false,
   created_at timestamptz not null default now()
 );
 
@@ -44,7 +52,8 @@ create table public.alerts (
   type text not null check (type in ('alert','normal')),
   speed integer not null,
   location text,
-  timestamp timestamptz not null default now()
+  timestamp timestamptz not null default now(),
+  trip_id uuid references public.trips(id) on delete set null
 );
 
 create table public.weekly_reports (
@@ -63,9 +72,8 @@ create table public.weekly_reports (
   unique (user_id, week_start)
 );
 
--- One row per (driver, guardian device) that is watching a driver's Share
--- Code. Lets a driver's app look up every guardian push token to notify
--- when an overspeed alert fires, even if the guardian's app is closed.
+-- Watchers: one row per (driver, guardian) pair. Used to look up guardian
+-- push tokens so the driver's app can send overspeed notifications.
 create table public.watchers (
   id uuid primary key default gen_random_uuid(),
   driver_id uuid not null references public.users(id) on delete cascade,
@@ -76,22 +84,14 @@ create table public.watchers (
   unique (driver_id, guardian_id)
 );
 
+-- Enable RLS
 alter table public.users enable row level security;
 alter table public.trips enable row level security;
 alter table public.alerts enable row level security;
 alter table public.weekly_reports enable row level security;
 alter table public.watchers enable row level security;
 
--- ---------------------------------------------------------------------
--- NO-AUTH POLICIES
--- This app has no login screen and no Supabase Auth session, so every
--- request comes in as the "anon" role using only the public anon key.
--- These policies open full read/write to anon, which is fine for a
--- private, 2-person family app but means anyone who obtains the anon
--- key + a Share Code could read/write that row. Do not reuse this
--- schema for anything with real strangers as users.
--- ---------------------------------------------------------------------
-
+-- Open policies for anon (no Supabase Auth used)
 create policy "users_all_anon"
 on public.users for all to anon
 using (true) with check (true);
@@ -112,8 +112,7 @@ create policy "watchers_all_anon"
 on public.watchers for all to anon
 using (true) with check (true);
 
--- Enable Realtime for live driver location/speed updates (this is what
--- makes the guardian's screen update instantly, like a shared live sheet).
+-- Enable Realtime
 do $$
 begin
   alter publication supabase_realtime add table public.users;
@@ -121,11 +120,16 @@ exception
   when duplicate_object then null;
 end $$;
 
--- Enable Realtime for alerts too, so the guardian's phone receives the
--- driver's overspeed events instantly (and can raise local notifications).
 do $$
 begin
   alter publication supabase_realtime add table public.alerts;
+exception
+  when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  alter publication supabase_realtime add table public.trips;
 exception
   when duplicate_object then null;
 end $$;
