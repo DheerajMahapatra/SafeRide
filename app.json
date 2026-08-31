@@ -12,7 +12,10 @@
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "SafeRide needs your location to track your rides and show them to your family.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "SafeRide tracks your location in the background so your family can see your live location and speed even when the app is closed.",
-        "UIBackgroundModes": ["location", "fetch"]
+        "UIBackgroundModes": [
+          "location",
+          "fetch"
+        ]
       }
     },
     "android": {
@@ -30,7 +33,9 @@
         "ACCESS_BACKGROUND_LOCATION",
         "FOREGROUND_SERVICE",
         "FOREGROUND_SERVICE_LOCATION",
-        "POST_NOTIFICATIONS"
+        "POST_NOTIFICATIONS",
+        "RECEIVE_BOOT_COMPLETED",
+        "WAKE_LOCK"
       ]
     },
     "web": {
@@ -50,9 +55,16 @@
       [
         "expo-notifications",
         {
-          "color": "#22c55e"
+          "color": "#22c55e",
+          "icon": "./assets/icon.png",
+          "mode": "production"
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "3be12de2-5504-4786-a431-0363096d6b61"
+      }
+    }
   }
 }
