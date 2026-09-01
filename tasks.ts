@@ -2,6 +2,7 @@ import * as TaskManager from "expo-task-manager";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createClient } from "@supabase/supabase-js";
+import { CONFIG } from "./config";
 
 // ---------- REVERSE GEOCODE HELPER ----------
 async function reverseGeocodeName(lat: number, lng: number): Promise<string> {
@@ -19,18 +20,39 @@ async function reverseGeocodeName(lat: number, lng: number): Promise<string> {
 export const BACKGROUND_LOCATION_TASK = "saferide-background-location";
 export const BACKGROUND_SYNC_TASK = "saferide-background-sync";
 
-const SPEED_LIMIT = 60;
-const SAFE_BUFFER_KMH = 5;
-const MIN_MOVING_KMH = 4;
+const SPEED_LIMIT = CONFIG.SPEED_LIMIT;
+const SAFE_BUFFER_KMH = CONFIG.SAFE_BUFFER_KMH;
+const MIN_MOVING_KMH = CONFIG.MIN_MOVING_KMH;
 
-const SUPABASE_URL = "https://utmgohephegziskyyfbl.supabase.co";
-const SUPABASE_PUBLISHABLE_KEY =
-  "sb_publishable_G28E7vZqCNanVPjOVBKqYw_FK8NNSje";
+const SUPABASE_URL = CONFIG.SUPABASE_URL;
+const SUPABASE_PUBLISHABLE_KEY = CONFIG.SUPABASE_PUBLISHABLE_KEY;
 
 function getSupabaseClient() {
   return createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
     realtime: { params: { eventsPerSecond: 10 } },
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
   });
+}
+
+// Create an authenticated client using the stored session
+async function getAuthenticatedSupabaseClient() {
+  const client = getSupabaseClient();
+  try {
+    const sessionRaw = await AsyncStorage.getItem("sb-utmgohephegziskyyfbl-auth-token");
+    if (sessionRaw) {
+      const session = JSON.parse(sessionRaw);
+      if (session?.access_token) {
+        client.auth.setSession({
+          access_token: session.access_token,
+          refresh_token: session.refresh_token || "",
+        });
+      }
+    }
+  } catch (_e) {}
+  return client;
 }
 
 function haversineKm(
@@ -146,7 +168,7 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
     const userName = (await AsyncStorage.getItem("userName")) || "Driver";
     if (userId) {
       try {
-        const supabase = getSupabaseClient();
+        const supabase = await getAuthenticatedSupabaseClient();
         const routePoints = points.slice(-100).map((p) => ({
           lat: p.lat,
           lng: p.lng,
@@ -160,30 +182,10 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
           updated_at: new Date().toISOString(),
         };
 
-        // First push after background task starts: mark tracking_active + notify guardians
+        // First push after background task starts: mark tracking_active
         if (!bgFirstPushRaw) {
           updatePayload.tracking_active = true;
           await AsyncStorage.setItem("bg_firstPushDone", "true");
-          // Notify guardians tracking started from background
-          try {
-            const { data: watchers } = await supabase
-              .from("watchers").select("guardian_push_token").eq("driver_id", userId);
-            const tokens = (watchers || []).map((w: any) => w.guardian_push_token)
-              .filter((t: string) => !!t && t.startsWith("ExponentPushToken"));
-            if (tokens.length > 0) {
-              await fetch("https://exp.host/--/api/v2/push/send", {
-                method: "POST",
-                headers: { Accept: "application/json", "Content-Type": "application/json" },
-                body: JSON.stringify(tokens.map((to: string) => ({
-                  to, sound: "default",
-                  title: "🟢 Location Sharing Started",
-                  body: `${userName} has started sharing their live location with you.`,
-                  data: { type: "tracking_started", driverId: userId },
-                  priority: "high",
-                }))),
-              });
-            }
-          } catch (_e) {}
         }
 
         await supabase.from("users").update(updatePayload).eq("id", userId);
@@ -224,39 +226,11 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
           }
         }
 
-        // Periodic trip auto-save: every 5 minutes, save a snapshot to prevent data loss on app kill
+        // Auto-save: record the last known location for crash recovery (no trip insert — stopTracking handles the final save)
         const lastAutoSave = await AsyncStorage.getItem("bg_lastAutoSave");
         const now = Date.now();
-        if (!lastAutoSave || now - parseInt(lastAutoSave, 10) > 300000) {
+        if (!lastAutoSave || now - parseInt(lastAutoSave, 10) > 60000) {
           await AsyncStorage.setItem("bg_lastAutoSave", now.toString());
-          const durationSec = Math.round((now - startTime) / 1000);
-          if (points.length > 2 && durationSec > 60) {
-            try {
-              const startLoc = points.length > 0 ? await reverseGeocodeName(points[0].lat, points[0].lng) : "Unknown";
-              const endLoc = await reverseGeocodeName(latitude, longitude);
-              const alertCount = (await supabase.from("alerts").select("id", { count: "exact", head: true })
-                .eq("user_id", userId).gte("timestamp", new Date(startTime).toISOString())).count || 0;
-              await supabase.from("trips").insert({
-                user_id: userId,
-                date: new Date().toISOString().slice(0, 10),
-                points: points.slice(-500),
-                distance_km: distance,
-                duration_sec: durationSec,
-                max_speed: Math.max(0, ...points.map(p => p.speed)),
-                avg_speed: points.length > 1 ? Math.round(points.reduce((s, p) => s + p.speed, 0) / points.length) : 0,
-                alerts_count: alertCount,
-                started_at: new Date(startTime).toISOString(),
-                ended_at: new Date().toISOString(),
-                tracking_status: "active",
-                start_location: startLoc,
-                end_location: endLoc,
-                guardian_notified: false,
-              });
-              console.log("[SafeRide BG] Auto-saved trip:", points.length, "points,", durationSec, "sec");
-            } catch (e) {
-              console.warn("[SafeRide BG] Auto-save trip failed:", e);
-            }
-          }
         }
       } catch (e) {
         console.warn("[SafeRide BG] Supabase push failed:", e);
@@ -297,7 +271,7 @@ TaskManager.defineTask(BACKGROUND_SYNC_TASK, async () => {
     const currentSpeed = sorted[Math.floor(sorted.length / 2)] || 0;
     const points = pointsRaw ? JSON.parse(pointsRaw) : [];
 
-    const supabase = getSupabaseClient();
+    const supabase = await getAuthenticatedSupabaseClient();
     const distRaw2 = await AsyncStorage.getItem("bg_distance");
     const bgDistance = distRaw2 ? parseFloat(distRaw2) : 0;
     await supabase
@@ -403,75 +377,6 @@ export async function startBackgroundLocation(): Promise<boolean> {
 // ---------- HELPER: Stop Background Location ----------
 export async function stopBackgroundLocation(): Promise<void> {
   try {
-    // Read final state before clearing
-    const userId = await AsyncStorage.getItem("userId");
-    const userName = (await AsyncStorage.getItem("userName")) || "Driver";
-    const trackingActive = await AsyncStorage.getItem("trackingActive");
-    const pointsRaw = await AsyncStorage.getItem("bg_points");
-    const distRaw = await AsyncStorage.getItem("bg_distance");
-    const startRaw = await AsyncStorage.getItem("bg_startTime");
-
-    // Save final trip if there's data
-    if (trackingActive === "true" && userId && pointsRaw) {
-      const points = JSON.parse(pointsRaw);
-      const distance = distRaw ? parseFloat(distRaw) : 0;
-      const startTime = startRaw ? parseInt(startRaw, 10) : Date.now();
-      const durationSec = Math.round((Date.now() - startTime) / 1000);
-
-      if (points.length > 1 && durationSec > 10) {
-        try {
-          const supabase = getSupabaseClient();
-          const startLoc = await reverseGeocodeName(points[0].lat, points[0].lng);
-          const endLoc = await reverseGeocodeName(points[points.length - 1].lat, points[points.length - 1].lng);
-          await supabase.from("trips").insert({
-            user_id: userId,
-            date: new Date().toISOString().slice(0, 10),
-            points: points.slice(-500),
-            distance_km: distance,
-            duration_sec: durationSec,
-            max_speed: Math.max(0, ...points.map((p: any) => p.speed)),
-            avg_speed: points.length > 1 ? Math.round(points.reduce((s: number, p: any) => s + p.speed, 0) / points.length) : 0,
-            alerts_count: 0,
-            started_at: new Date(startTime).toISOString(),
-            ended_at: new Date().toISOString(),
-            tracking_status: "completed",
-            start_location: startLoc,
-            end_location: endLoc,
-            guardian_notified: false,
-          });
-          console.log("[SafeRide BG] Final trip saved:", points.length, "points");
-        } catch (e) {
-          console.warn("[SafeRide BG] Final trip save failed:", e);
-        }
-      }
-
-      // Mark tracking inactive in Supabase
-      try {
-        const supabase = getSupabaseClient();
-        await supabase.from("users").update({ tracking_active: false, updated_at: new Date().toISOString() }).eq("id", userId);
-      } catch (_e) {}
-
-      // Notify guardians tracking stopped
-      try {
-        const supabase = getSupabaseClient();
-        const { data: watchers } = await supabase.from("watchers").select("guardian_push_token").eq("driver_id", userId);
-        const tokens = (watchers || []).map((w: any) => w.guardian_push_token).filter((t: string) => !!t && t.startsWith("ExponentPushToken"));
-        if (tokens.length > 0) {
-          await fetch("https://exp.host/--/api/v2/push/send", {
-            method: "POST",
-            headers: { Accept: "application/json", "Content-Type": "application/json" },
-            body: JSON.stringify(tokens.map((to: string) => ({
-              to, sound: "default",
-              title: "🔴 Location Sharing Stopped",
-              body: `${userName} has stopped sharing their live location.`,
-              data: { type: "tracking_stopped", driverId: userId },
-              priority: "high",
-            }))),
-          });
-        }
-      } catch (_e) {}
-    }
-
     await AsyncStorage.setItem("trackingActive", "false");
     await AsyncStorage.setItem("bg_firstPushDone", "");
     await AsyncStorage.setItem("bg_lastAutoSave", "");
