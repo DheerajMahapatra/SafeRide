@@ -2,8 +2,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { View, Text, ScrollView, Pressable, StyleSheet, TextInput, Alert, Platform, Modal, AppState, LogBox } from "react-native";
 
 LogBox.ignoreLogs(["Text strings must be rendered within a <Text> component."]);
-const _origConsoleError=console.error.bind(console);
-console.error=(...args:any[])=>{if(typeof args[0]==="string"&&args[0].includes("Text strings must be rendered within a <Text> component"))return;_origConsoleError(...args);};
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { Feather } from "@expo/vector-icons";
@@ -15,8 +13,10 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Clipboard from "expo-clipboard";
 import * as NetInfo from "@react-native-community/netinfo";
 import { supabase } from "./supabase";
+import { CONFIG } from "./config";
 import { startBackgroundLocation, stopBackgroundLocation, readBackgroundData, BACKGROUND_LOCATION_TASK } from "./tasks";
 import { getGuardianTokens, sendExpoPush, notifyGuardiansTrackingStarted, notifyGuardiansTrackingStopped } from "./notifications";
+import { signUp, signIn, signOut as authSignOut, getCurrentUser, AuthUser, updatePushToken } from "./auth";
 import LiveMap from "./LiveMap";
 import Constants from "expo-constants";
 
@@ -41,9 +41,9 @@ const redBright = "#f75c5c";
 const muted = "#6b7a8f";
 const white = "#f5f7fa";
 const blue = "#3b82f6";
-const SPEED_LIMIT = 60;
-const SAFE_BUFFER_KMH = 5;
-const MIN_MOVING_KMH = 4;
+const SPEED_LIMIT = CONFIG.SPEED_LIMIT;
+const SAFE_BUFFER_KMH = CONFIG.SAFE_BUFFER_KMH;
+const MIN_MOVING_KMH = CONFIG.MIN_MOVING_KMH;
 
 function haversineKm(lat1:number,lon1:number,lat2:number,lon2:number):number{
   const R=6371;const dLat=((lat2-lat1)*Math.PI)/180;const dLon=((lon2-lon1)*Math.PI)/180;
@@ -65,26 +65,6 @@ type TripPoint={lat:number;lng:number;speed:number;timestamp:number};
 type Trip={id:string;date:string;points:TripPoint[];distanceKm:number;durationSec:number;maxSpeed:number;avgSpeed:number;alertsCount:number;startedAt:number;endedAt:number;trackingStatus:string;startLocation:string;endLocation:string};
 type AlertRecord={id:string;type:"alert"|"normal";speed:number;location:string;timestamp:number;lat?:number;lng?:number};
 type WeeklyReport={weekStart:string;weekEnd:string;totalDistance:number;totalTime:number;totalTrips:number;maxSpeed:number;safetyScore:number;dailyMaxSpeeds:number[];dailyOverEvents:number[]};
-
-async function loadJSON<T>(key:string,fallback:T):Promise<T>{try{const raw=await AsyncStorage.getItem(key);return raw?JSON.parse(raw):fallback;}catch{return fallback;}}
-async function saveJSON(key:string,value:any){await AsyncStorage.setItem(key,JSON.stringify(value));}
-function generateLocalId(){return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,(c)=>{const r=(Math.random()*16)|0;const v=c==="x"?r:(r&0x3)|0x8;return v.toString(16);});}
-function generateDeterministicId(name:string){
-  const lower=name.toLowerCase();let h=0;for(let i=0;i<lower.length;i++){h=((h<<5)-h+lower.charCodeAt(i))|0;}
-  let seed=Math.abs(h)||1;
-  function rng(){seed|=0;seed=seed+0x6D2B79F5|0;let t=Math.imul(seed^seed>>>15,1|seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,(c)=>{const r=rng()*16;const v=c==="x"?r:(r&0x3)|0x8;return v.toString(16);});
-}
-function generateShortId(name?:string){
-  const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  if(name&&name.trim()){
-    let h=0;
-    const n=name.trim().toLowerCase();
-    for(let i=0;i<n.length;i++){h=((h<<5)-h+n.charCodeAt(i))|0;}
-    let s="";for(let i=0;i<6;i++){h=Math.abs(h*131+i*37);s+=chars[h%chars.length];}return s;
-  }
-  let s="";for(let i=0;i<6;i++){s+=chars[Math.floor(Math.random()*chars.length)];}return s;
-}
 
 // ---------- Send Push Helper ----------
 async function pushToGuardians(driverId:string,title:string,body:string,data?:any){
@@ -183,7 +163,7 @@ function WatchedDriverCard({driver}:{driver:any}){
 }
 
 // ===== HOME SCREEN =====
-function HomeScreen({tracking,driverName,onResetDevice,onStartTracking,onStopTracking}:any){
+function HomeScreen({tracking,driverName,onSignOut,onStartTracking,onStopTracking}:any){
   const{isTracking,speed,status,coords,route,distanceKm,durationSec}=tracking;
   const[locationName,setLocationName]=useState("Acquiring...");
 
@@ -298,8 +278,8 @@ function HomeScreen({tracking,driverName,onResetDevice,onStartTracking,onStopTra
       </View>
       <Text style={{color:muted,fontSize:11}}>{new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</Text>
     </View>}
-    <Pressable onPress={onResetDevice} style={{paddingHorizontal:16,paddingVertical:10}}>
-      <Text style={{color:muted,fontSize:12,textAlign:"right"}}>Reset device</Text>
+    <Pressable onPress={onSignOut} style={{paddingHorizontal:16,paddingVertical:10}}>
+      <Text style={{color:muted,fontSize:12,textAlign:"right"}}>Sign Out</Text>
     </Pressable>
   </ScrollView>);
 }
@@ -566,66 +546,137 @@ function ShareScreen({userId,shortId,userName,userRole,isTracking,latestLocation
   </ScrollView>);
 }
 
-// ===== SETUP SCREEN =====
-function SetupScreen({userName,setUserName,userRole,setUserRole,setShortId,setUserId,onDone,supabaseReady}:any){
-  const[n,setN]=useState(userName||"");
+// ===== LOGIN SCREEN =====
+function LoginScreen({onLogin,supabaseReady}:any){
+  const[mode,setMode]=useState<"signin"|"signup">("signin");
+  const[email,setEmail]=useState("");
+  const[password,setPassword]=useState("");
+  const[name,setName]=useState("");
+  const[userRole,setUserRole]=useState<"driver"|"guardian">("driver");
   const[busy,setBusy]=useState(false);
   const[error,setError]=useState("");
-  const handleContinue=useCallback(async()=>{
-    if(!n.trim())return;
+  const[showPassword,setShowPassword]=useState(false);
+  const[signUpDone,setSignUpDone]=useState(false);
+
+  const isValid=email.trim().length>3&&password.length>=6&&(mode==="signin"||name.trim().length>0);
+
+  const handleSubmit=useCallback(async()=>{
+    if(!isValid||busy)return;
     setBusy(true);setError("");
-    const trimmedName=n.trim();
-    const sid=generateShortId(trimmedName);
-    let uid=generateDeterministicId(trimmedName);
-    let finalSid=sid;
-    // Check Supabase for existing user with same name
-    if(supabaseReady){
-      try{
-        const{data:existing}=await supabase.from("users").select("id,short_id,role").eq("name",trimmedName).maybeSingle();
-        if(existing){
-          uid=existing.id;
-          finalSid=existing.short_id||sid;
-          console.log("[SafeRide] Found existing user in Supabase:",uid,"ShortId:",finalSid);
-        }
-      }catch(e){console.warn("[SafeRide] Supabase lookup failed:",e);}
+    if(mode==="signup"){
+      const result=await signUp(email,password,name.trim(),userRole);
+      if(result.error){
+        setError(result.error);
+        setBusy(false);
+        return;
+      }
+      if(result.needsConfirmation){
+        setError("");
+        setSignUpDone(true);
+        setBusy(false);
+        return;
+      }
+      if(result.user){
+        await AsyncStorage.setItem("sr_state",JSON.stringify({
+          setupDone:true,
+          userName:result.user.name,
+          userRole:result.user.role,
+          userId:result.user.id,
+          shortId:result.user.shortId,
+          email:result.user.email,
+        }));
+        onLogin(result.user);
+      }
+    }else{
+      const result=await signIn(email,password);
+      if(result.error){
+        setError(result.error);
+        setBusy(false);
+        return;
+      }
+      if(result.user){
+        await AsyncStorage.setItem("sr_state",JSON.stringify({
+          setupDone:true,
+          userName:result.user.name,
+          userRole:result.user.role,
+          userId:result.user.id,
+          shortId:result.user.shortId,
+          email:result.user.email,
+        }));
+        onLogin(result.user);
+      }
     }
-    setUserId(uid);setShortId(finalSid);setUserName(trimmedName);
-    await AsyncStorage.setItem("sr_state",JSON.stringify({setupDone:true,userName:trimmedName,userRole,userId:uid,shortId:finalSid}));
-    onDone();
     setBusy(false);
-  },[n,userRole,supabaseReady]);
+  },[email,password,name,userRole,mode,isValid,busy]);
+
   return(<View style={{paddingHorizontal:24,justifyContent:"center",flex:1}}>
     <View style={{alignItems:"center",marginBottom:32}}>
       <View style={{width:72,height:72,borderRadius:18,backgroundColor:green,alignItems:"center",justifyContent:"center",marginBottom:16}}>
         <Text style={{fontWeight:"900",color:"#05300f",fontSize:26}}>SR</Text>
       </View>
       <Text style={{color:white,fontWeight:"900",fontSize:30,marginBottom:8}}>SafeRide</Text>
-      <Text style={{color:muted,fontSize:14,textAlign:"center"}}>No login needed – just tell us who's using this phone</Text>
+      <Text style={{color:muted,fontSize:14,textAlign:"center"}}>{mode==="signin"?"Sign in to your account":"Create your account"}</Text>
     </View>
     <View style={[styles.card,{padding:20}]}>
-      <Text style={styles.labelSm}>YOUR NAME</Text>
+      {mode==="signup"&&<>
+        <Text style={styles.labelSm}>YOUR NAME</Text>
+        <View style={{flexDirection:"row",alignItems:"center",backgroundColor:cardBg2,borderRadius:10,borderWidth:1,borderColor:border,marginTop:8,paddingHorizontal:12}}>
+          <Feather name="user" size={18} color={muted}/>
+          <TextInput style={{flex:1,color:white,fontSize:15,padding:12}} value={name} onChangeText={setName} placeholder="e.g. Dheeraj" placeholderTextColor={muted} autoCapitalize="words"/>
+        </View>
+      </>}
+      <Text style={[styles.labelSm,{marginTop:16}]}>EMAIL</Text>
       <View style={{flexDirection:"row",alignItems:"center",backgroundColor:cardBg2,borderRadius:10,borderWidth:1,borderColor:border,marginTop:8,paddingHorizontal:12}}>
-        <Feather name="user" size={18} color={muted}/>
-        <TextInput style={{flex:1,color:white,fontSize:15,padding:12}} value={n} onChangeText={(t)=>{setN(t);setError("");}} placeholder="e.g. Dheeraj" placeholderTextColor={muted} autoCapitalize="words"/>
+        <Feather name="mail" size={18} color={muted}/>
+        <TextInput style={{flex:1,color:white,fontSize:15,padding:12}} value={email} onChangeText={(t)=>{setEmail(t);setError("");}} placeholder="you@example.com" placeholderTextColor={muted} keyboardType="email-address" autoCapitalize="none" autoCorrect={false}/>
       </View>
-      {error?<Text style={{color:redBright,fontSize:12,marginTop:6}}>{error}</Text>:null}
-      <Text style={[styles.labelSm,{marginTop:20}]}>THIS PHONE IS THE...</Text>
-      <View style={{flexDirection:"row",gap:10,marginTop:8}}>
-        <Pressable onPress={()=>setUserRole("driver")} style={{flex:1,flexDirection:"row",alignItems:"center",justifyContent:"center",gap:8,backgroundColor:userRole==="driver"?"rgba(34,197,94,0.15)":"transparent",borderRadius:12,paddingVertical:14,borderWidth:1.5,borderColor:userRole==="driver"?green:border}}>
-          <Feather name="navigation" size={16} color={userRole==="driver"?green:muted}/>
-          <Text style={{color:userRole==="driver"?white:muted,fontWeight:"700",fontSize:15}}>Driver</Text>
-        </Pressable>
-        <Pressable onPress={()=>setUserRole("guardian")} style={{flex:1,flexDirection:"row",alignItems:"center",justifyContent:"center",gap:8,backgroundColor:userRole==="guardian"?"rgba(34,197,94,0.15)":"transparent",borderRadius:12,paddingVertical:14,borderWidth:1.5,borderColor:userRole==="guardian"?green:border}}>
-          <Feather name="shield" size={16} color={userRole==="guardian"?green:muted}/>
-          <Text style={{color:userRole==="guardian"?white:muted,fontWeight:"700",fontSize:15}}>Guardian</Text>
+      <Text style={[styles.labelSm,{marginTop:16}]}>PASSWORD</Text>
+      <View style={{flexDirection:"row",alignItems:"center",backgroundColor:cardBg2,borderRadius:10,borderWidth:1,borderColor:border,marginTop:8,paddingHorizontal:12}}>
+        <Feather name="lock" size={18} color={muted}/>
+        <TextInput style={{flex:1,color:white,fontSize:15,padding:12}} value={password} onChangeText={(t)=>{setPassword(t);setError("");}} placeholder="Min 6 characters" placeholderTextColor={muted} secureTextEntry={!showPassword}/>
+        <Pressable onPress={()=>setShowPassword(!showPassword)} style={{padding:4}}>
+          <Feather name={showPassword?"eye-off":"eye"} size={18} color={muted}/>
         </Pressable>
       </View>
-      <Text style={{color:muted,fontSize:12,marginTop:10}}>{userRole==="driver"?"Driver = the phone that travels and gets tracked.":"Guardian = the phone that monitors someone's safety."}</Text>
-      <Pressable onPress={handleContinue} disabled={busy||!n.trim()} style={[styles.btnPrimary,{marginTop:20,opacity:n.trim()&&!busy?1:0.4}]}>
-        <Text style={{color:"#05300f",fontWeight:"800",fontSize:16}}>{busy?"Looking up...":"Continue"}</Text>
-      </Pressable>
-      <Text style={{color:muted,fontSize:11,textAlign:"center",marginTop:12,lineHeight:16}}>This creates a permanent id for this phone. Your name is unique – if you've used SafeRide before, your data will be restored.</Text>
+      {mode==="signup"&&<>
+        <Text style={[styles.labelSm,{marginTop:20}]}>I AM A...</Text>
+        <View style={{flexDirection:"row",gap:10,marginTop:8}}>
+          <Pressable onPress={()=>setUserRole("driver")} style={{flex:1,flexDirection:"row",alignItems:"center",justifyContent:"center",gap:8,backgroundColor:userRole==="driver"?"rgba(34,197,94,0.15)":"transparent",borderRadius:12,paddingVertical:14,borderWidth:1.5,borderColor:userRole==="driver"?green:border}}>
+            <Feather name="navigation" size={16} color={userRole==="driver"?green:muted}/>
+            <Text style={{color:userRole==="driver"?white:muted,fontWeight:"700",fontSize:15}}>Driver</Text>
+          </Pressable>
+          <Pressable onPress={()=>setUserRole("guardian")} style={{flex:1,flexDirection:"row",alignItems:"center",justifyContent:"center",gap:8,backgroundColor:userRole==="guardian"?"rgba(34,197,94,0.15)":"transparent",borderRadius:12,paddingVertical:14,borderWidth:1.5,borderColor:userRole==="guardian"?green:border}}>
+            <Feather name="shield" size={16} color={userRole==="guardian"?green:muted}/>
+            <Text style={{color:userRole==="guardian"?white:muted,fontWeight:"700",fontSize:15}}>Guardian</Text>
+          </Pressable>
+        </View>
+        <Text style={{color:muted,fontSize:12,marginTop:8}}>{userRole==="driver"?"Driver = the phone that travels and gets tracked.":"Guardian = the phone that monitors someone's safety."}</Text>
+      </>}
+      {signUpDone?<View style={{backgroundColor:"rgba(34,197,94,0.15)",borderRadius:10,padding:14,marginTop:10,borderWidth:1,borderColor:green}}>
+        <View style={{flexDirection:"row",alignItems:"center",gap:8,marginBottom:8}}>
+          <Feather name="check-circle" size={18} color={green}/>
+          <Text style={{color:green,fontWeight:"700",fontSize:14}}>Account Created!</Text>
+        </View>
+        <Text style={{color:white,fontSize:13,lineHeight:18}}>Check your email <Text style={{fontWeight:"700"}}>{email}</Text> and click the confirmation link.</Text>
+        <Text style={{color:muted,fontSize:12,marginTop:8,lineHeight:16}}>After confirming, come back here and sign in with your email and password.</Text>
+        <Pressable onPress={()=>{setSignUpDone(false);setMode("signin");}} style={{marginTop:12,backgroundColor:green,borderRadius:8,paddingVertical:10,alignItems:"center"}}>
+          <Text style={{color:"#05300f",fontWeight:"700",fontSize:13}}>Go to Sign In</Text>
+        </Pressable>
+      </View>:null}
+      {error?<Text style={{color:redBright,fontSize:12,marginTop:10}}>{error}</Text>:null}
+      {!signUpDone&&<Pressable onPress={handleSubmit} disabled={!isValid||busy} style={[styles.btnPrimary,{marginTop:16,opacity:isValid&&!busy?1:0.4}]}>
+        <Text style={{color:"#05300f",fontWeight:"800",fontSize:16}}>{busy?(mode==="signup"?"Creating account...":"Signing in..."):(mode==="signup"?"Create Account":"Sign In")}</Text>
+      </Pressable>}
+      {!signUpDone&&<Pressable onPress={()=>{setMode(mode==="signin"?"signup":"signin");setError("");}} style={{marginTop:14,alignItems:"center"}}>
+        <Text style={{color:muted,fontSize:13}}>
+          {mode==="signin"?"Don't have an account? ":"Already have an account? "}
+          <Text style={{color:green,fontWeight:"700"}}>{mode==="signin"?"Sign Up":"Sign In"}</Text>
+        </Text>
+      </Pressable>}
     </View>
+    {!supabaseReady&&<View style={[styles.card,{backgroundColor:"rgba(239,68,68,0.15)",borderColor:red,marginTop:12}]}>
+      <Text style={{color:redBright,fontWeight:"700",fontSize:12}}>Server offline — sign up requires internet connection.</Text>
+    </View>}
   </View>);
 }
 
@@ -648,6 +699,7 @@ function InAppBanner({notifs,dismiss}:{notifs:{id:string;title:string;body:strin
 
 export default function App(){
   const[appState,setAppState]=useState(AppState.currentState);
+  const[authUser,setAuthUser]=useState<AuthUser|null>(null);
   const[setupDone,setSetupDone]=useState(false);
   const[userName,setUserName]=useState("");
   const[userRole,setUserRole]=useState("driver");
@@ -728,45 +780,39 @@ export default function App(){
   const locationRef = useRef<LatLng|null>(null);
   const loadTripsRef = useRef<(()=>Promise<void>)|null>(null);
   const trackingStartTimeRef = useRef<number>(0);
+  const speedRef = useRef(0);
+  const lastLocationTimestampRef = useRef<number>(0);
 
   // ---- Init: load saved state ----
   const[initLoading,setInitLoading]=useState(true);
   useEffect(()=>{
     (async()=>{
       try{
+        // Check for existing auth session (auto-login)
+        const user=await getCurrentUser();
+        if(user){
+          setAuthUser(user);
+          setSetupDone(true);
+          setUserName(user.name);
+          setUserRole(user.role);
+          setUserId(user.id);
+          setShortId(user.shortId);
+          await AsyncStorage.setItem("sr_state",JSON.stringify({setupDone:true,userName:user.name,userRole:user.role,userId:user.id,shortId:user.shortId,email:user.email}));
+          await AsyncStorage.setItem("userId",user.id);
+          await AsyncStorage.setItem("userName",user.name);
+          setInitLoading(false);
+          return;
+        }
+        // Fallback: check local storage for legacy session
         const saved=await AsyncStorage.getItem("sr_state");
-        let loadedUserId="";
-        let loadedShortId="";
-        let parsedName="";
-        let parsedRole="driver";
         if(saved){
           const s=JSON.parse(saved);
-          if(s.setupDone){
+          if(s.setupDone&&s.userId){
             setSetupDone(true);
             setUserName(s.userName||"");
             setUserRole(s.userRole||"driver");
-            loadedUserId=s.userId||"";
-            loadedShortId=s.shortId||"";
-            parsedName=s.userName||"";
-            parsedRole=s.userRole||"driver";
-            setUserId(loadedUserId);
-            setShortId(loadedShortId);
-          }
-        }
-        if(!loadedUserId){
-          const uid=generateLocalId();
-          const sid=generateShortId();
-          loadedUserId=uid;
-          loadedShortId=sid;
-          setUserId(uid);
-          setShortId(sid);
-          await AsyncStorage.setItem("sr_state",JSON.stringify({setupDone:true,userName:"",userRole:"driver",userId:uid,shortId:sid}));
-        }else{
-          if(!loadedShortId){
-            const sid=generateShortId();
-            loadedShortId=sid;
-            setShortId(sid);
-            await AsyncStorage.setItem("sr_state",JSON.stringify({setupDone:true,userName:"",userRole:"driver",userId:loadedUserId,shortId:sid}));
+            setUserId(s.userId||"");
+            setShortId(s.shortId||"");
           }
         }
       }catch(e){console.warn("Init error",e);}
@@ -805,6 +851,8 @@ export default function App(){
                   if(projectId){
                     const tokenResult=await Notifications.getExpoPushTokenAsync({projectId});
                     setPushToken(tokenResult.data);
+                    // Update push token in Supabase via auth module
+                    updatePushToken(tokenResult.data).catch(()=>{});
                   }
                 }catch(e){console.warn("Push token registration failed:",e);}
               }
@@ -823,21 +871,6 @@ export default function App(){
     if(!supabaseReady||!userId||!userName)return;
     (async()=>{
       try{
-        // First, check if a user with this name already exists in Supabase
-        const{data:existingByName}=await supabase.from("users").select("id,short_id,role").eq("name",userName).maybeSingle();
-        if(existingByName&&existingByName.id!==userId){
-          // This name already exists in Supabase with a different ID - adopt that identity
-          console.log("[SafeRide] Found existing user by name:",userName,"Adopting Id:",existingByName.id);
-          const existingId=existingByName.id;
-          const existingShortId=existingByName.short_id||shortId;
-          setUserId(existingId);
-          setShortId(existingShortId);
-          if(existingByName.role)setUserRole(existingByName.role);
-          await AsyncStorage.setItem("sr_state",JSON.stringify({setupDone,userName,userRole,userId:existingId,shortId:existingShortId}));
-          // Update push token for the adopted identity
-          try{await supabase.from("users").upsert({id:existingId,push_token:pushToken,updated_at:new Date().toISOString()},{onConflict:"id"});}catch(e){}
-          return;
-        }
         // Check if this user already has a short_id in Supabase - NEVER change it
         const{data:existingMe}=await supabase.from("users").select("short_id").eq("id",userId).maybeSingle();
         let finalShortId=existingMe?.short_id||shortId;
@@ -855,12 +888,12 @@ export default function App(){
           setShortId(finalShortId);
           await AsyncStorage.setItem("sr_state",JSON.stringify({setupDone,userName,userRole,userId,shortId:finalShortId}));
         }
-        const{error:upsertErr}=await supabase.from("users").upsert({id:userId,name:userName,role:userRole,short_id:finalShortId,push_token:pushToken,updated_at:new Date().toISOString()},{onConflict:"id"});
+        const{error:upsertErr}=await supabase.from("users").upsert({id:userId,email:authUser?.email||userName+"@placeholder.local",name:userName,role:userRole,short_id:finalShortId,push_token:pushToken,updated_at:new Date().toISOString()},{onConflict:"id"});
         if(upsertErr)console.warn("[SafeRide] User upsert error:",upsertErr.message);
         else console.log("[SafeRide] User upserted. Id:",userId,"ShortId:",finalShortId);
       }catch(e){console.warn("[SafeRide] User upsert exception:",e);}
     })();
-  },[userId,userName,userRole,shortId,pushToken,supabaseReady]);
+  },[userId,userName,userRole,shortId,pushToken,supabaseReady,authUser]);
 
   // ---- Save state to storage ----
   useEffect(()=>{
@@ -881,6 +914,7 @@ export default function App(){
   useEffect(()=>{userIdRef.current=userId;},[userId]);
   useEffect(()=>{isTrackingRef.current=isTracking;},[isTracking]);
   useEffect(()=>{locationRef.current=location;},[location]);
+  useEffect(()=>{speedRef.current=speed;},[speed]);
 
   // ---- Recover tracking state on app restart ----
   useEffect(()=>{
@@ -905,26 +939,6 @@ export default function App(){
         }
       }catch(e){}
     })();
-  },[]);
-
-  // ---- AppState listener: sync background data when app returns to foreground ----
-  useEffect(()=>{
-    const sub=AppState.addEventListener("change",async(state)=>{
-      if(state==="active"&&isTrackingRef.current){
-        // App just came to foreground — pull in background data
-        const bg=await readBackgroundData();
-        if(bg&&bg.points&&bg.points.length>0){
-          const lastPt=bg.points[bg.points.length-1];
-          setLocation({lat:lastPt.lat,lng:lastPt.lng});
-          setSpeed(lastPt.speed);
-          if(bg.status){statusRef.current=bg.status;setStatus(bg.status);}
-          setRoutePoints(bg.points.map(p=>({lat:p.lat,lng:p.lng})));
-          setTotalDistKm(bg.distance);
-          if(bg.startTime){trackingStartTimeRef.current=bg.startTime;setElapsedSec(Math.round((Date.now()-bg.startTime)/1000));}
-        }
-      }
-    });
-    return()=>{sub.remove();};
   },[]);
 
   // ---- Background tasks ----
@@ -985,7 +999,12 @@ export default function App(){
       setSpeed(speedKmh);
       setRoutePoints(rp=>[...rp,newLoc]);
       if(dKm>0.01&&speedKmh>0&&acc<=50)setTotalDistKm(td=>td+dKm);
-      setElapsedSec(e=>e+5);
+      // Use actual GPS timestamp for elapsed time (BUG 9 fix)
+      if(lastLocationTimestampRef.current>0){
+        const deltaSec=Math.round((loc.timestamp-lastLocationTimestampRef.current)/1000);
+        if(deltaSec>0&&deltaSec<30)setElapsedSec(e=>e+deltaSec);
+      }
+      lastLocationTimestampRef.current=loc.timestamp;
 
       // Status hysteresis (matches background task)
       // Require at least 3 samples before triggering overspeed (prevents GPS noise false positives when stationary)
@@ -1073,27 +1092,6 @@ export default function App(){
   useEffect(()=>{
     const sub=AppState.addEventListener("change",async(next)=>{
       setAppState(next);
-      if(next==="background"&&isTrackingRef.current){
-        // Save trip when app goes to background so data persists
-        const pts=routePointsRef.current;
-        const supReady=supabaseReadyRef.current;
-        const uid=userIdRef.current;
-        const elapsed=elapsedSecRef.current;
-        const dist=totalDistKmRef.current;
-        const al=alertsRef.current;
-        const bgStartRaw=await AsyncStorage.getItem("bg_trackingStart");
-        const startTime=bgStartRaw?parseInt(bgStartRaw,10):Date.now()-elapsed*1000;
-        console.log("[SafeRide] Background save check. Points:",pts.length,"Supabase:",supReady,"UserId:",uid);
-        if(supReady&&uid&&pts.length>1){
-          try{
-            const startLoc=await reverseGeocode(pts[0].lat,pts[0].lng);
-            const endLoc=await reverseGeocode(pts[pts.length-1].lat,pts[pts.length-1].lng);
-            const{error:tripErr}=await supabase.from("trips").insert({user_id:uid,date:new Date().toISOString().slice(0,10),points:pts,distance_km:dist,duration_sec:elapsed,max_speed:Math.max(...al.map(a=>a.speed),0),avg_speed:0,alerts_count:al.length,started_at:new Date(startTime).toISOString(),ended_at:new Date().toISOString(),tracking_status:"completed",start_location:startLoc,end_location:endLoc,guardian_notified:false});
-            if(tripErr)console.warn("[SafeRide] Background trip save error:",tripErr.message);
-            else{console.log("[SafeRide] Trip saved on background with",pts.length,"points,",elapsed,"sec");if(loadTripsRef.current)await loadTripsRef.current();}
-          }catch(e){console.warn("[SafeRide] Background trip save exception:",e);}
-        }
-      }
       if(next==="active"&&isTrackingRef.current){
         const bg=await readBackgroundData();
         if(bg&&bg.points&&bg.points.length>0){
@@ -1106,7 +1104,7 @@ export default function App(){
           }
           setRoutePoints(bg.points.map(p=>({lat:p.lat,lng:p.lng})));
           setTotalDistKm(bg.distance);
-          if(bg.startTime)setElapsedSec(Math.round((Date.now()-bg.startTime)/1000));
+          if(bg.startTime){trackingStartTimeRef.current=bg.startTime;setElapsedSec(Math.round((Date.now()-bg.startTime)/1000));}
         }
       }
     });
@@ -1315,7 +1313,7 @@ export default function App(){
       setRoutePoints([]);setTotalDistKm(0);setElapsedSec(0);setSpeed(0);setStatus("SAFE");
       sessionAlertsRef.current=[];
       trackingStartTimeRef.current=Date.now();
-      AsyncStorage.setItem("bg_trackingStart",trackingStartTimeRef.current.toString()).catch(()=>{});
+      AsyncStorage.setItem("bg_startTime",trackingStartTimeRef.current.toString()).catch(()=>{});
       const loc=await Location.getCurrentPositionAsync({accuracy:Location.Accuracy.High});
       const newLoc={lat:loc.coords.latitude,lng:loc.coords.longitude};
       locationRef.current=newLoc;
@@ -1340,20 +1338,20 @@ export default function App(){
     if(supabaseReadyRef.current&&uid){
       try{await supabase.from("users").update({tracking_active:false,updated_at:new Date().toISOString()}).eq("id",uid);}catch(e){}
     }
-    // Use refs for latest values
+    // Use refs for latest values (avoids stale closures)
     const pts=routePointsRef.current;
     const elapsed=elapsedSecRef.current;
     const dist=totalDistKmRef.current;
     const al=sessionAlertsRef.current;
     const supReady=supabaseReadyRef.current;
-    const spd=speed;
+    const spd=speedRef.current;
     const startTime=trackingStartTimeRef.current||Date.now()-elapsed*1000;
     console.log("[SafeRide] Stopping tracking. Points:",pts.length,"Duration:",Math.round(elapsed/60),"min","Supabase:",supReady,"UserId:",uid);
     if(supReady&&uid&&pts.length>1){
       try{
         const startLoc=await reverseGeocode(pts[0].lat,pts[0].lng);
         const endLoc=await reverseGeocode(pts[pts.length-1].lat,pts[pts.length-1].lng);
-        const{error:tripErr}=await supabase.from("trips").insert({user_id:uid,date:new Date().toISOString().slice(0,10),points:pts,distance_km:dist,duration_sec:elapsed,max_speed:Math.max(...al.map(a=>a.speed),0),avg_speed:pts.length>1?Math.round(spd):0,alerts_count:al.length,started_at:new Date(startTime).toISOString(),ended_at:new Date().toISOString(),tracking_status:"completed",start_location:startLoc,end_location:endLoc,guardian_notified:false});
+        const{error:tripErr}=await supabase.from("trips").insert({user_id:uid,date:new Date().toISOString().slice(0,10),points:pts,distance_km:dist,duration_sec:elapsed,max_speed:Math.max(0,...al.map(a=>a.speed),spd),avg_speed:spd,alerts_count:al.length,started_at:new Date(startTime).toISOString(),ended_at:new Date().toISOString(),tracking_status:"completed",start_location:startLoc,end_location:endLoc,guardian_notified:false});
         if(tripErr)console.warn("[SafeRide] Trip save error:",tripErr.message);
         else{console.log("[SafeRide] Trip saved with",pts.length,"points,",startLoc,"→",endLoc);if(loadTripsRef.current)await loadTripsRef.current();}
       }catch(e){console.warn("Save trip error",e);}
@@ -1366,7 +1364,7 @@ export default function App(){
       scheduleLocalNotif("Tracking Stopped","You are no longer sharing your live location.");
       notifyGuardiansTrackingStopped(uid,userName||"Driver").catch(()=>{});
     }
-  },[speed,reverseGeocode,userName,addInAppNotif,scheduleLocalNotif]);
+  },[reverseGeocode,userName,addInAppNotif,scheduleLocalNotif]);
 
   // ---- Tab config ----
   const tabs=useMemo(()=>{
@@ -1375,16 +1373,17 @@ export default function App(){
   },[userRole]);
 
   if(initLoading)return(<SafeAreaView style={styles.container}><View style={{flex:1,alignItems:"center",justifyContent:"center"}}><View style={{width:72,height:72,borderRadius:18,backgroundColor:green,alignItems:"center",justifyContent:"center",marginBottom:16}}><Text style={{fontWeight:"900",color:"#05300f",fontSize:26}}>SR</Text></View><Text style={{color:white,fontWeight:"900",fontSize:30,marginBottom:8}}>SafeRide</Text></View></SafeAreaView>);
-  if(!setupDone)return(<SafeAreaView style={styles.container}><SetupScreen userName={userName} setUserName={setUserName} userRole={userRole} setUserRole={setUserRole} setShortId={setShortId} setUserId={setUserId} onDone={()=>setSetupDone(true)} supabaseReady={supabaseReady}/></SafeAreaView>);
+  if(!setupDone)return(<SafeAreaView style={styles.container}><LoginScreen onLogin={(user:AuthUser)=>{setAuthUser(user);setSetupDone(true);setUserName(user.name);setUserRole(user.role);setUserId(user.id);setShortId(user.shortId);}} supabaseReady={supabaseReady}/></SafeAreaView>);
 
-  const resetDevice=()=>{Alert.alert("Reset Device","This will erase all local data and create a new identity.",[{text:"Cancel",style:"cancel"},{text:"Reset",style:"destructive",onPress:async()=>{await AsyncStorage.clear();setSetupDone(false);setUserName("");setUserRole("driver");setUserId("");setShortId("");setIsTracking(false);setRoutePoints([]);setTotalDistKm(0);setElapsedSec(0);setAlerts([]);setTrips([]);}}]);};
+  const handleSignOut=()=>{Alert.alert("Sign Out","Are you sure you want to sign out?",[{text:"Cancel",style:"cancel"},{text:"Sign Out",style:"destructive",onPress:async()=>{setIsTracking(false);if(watchSubRef.current){watchSubRef.current.remove();watchSubRef.current=null;}if(bgIntervalRef.current){clearInterval(bgIntervalRef.current);bgIntervalRef.current=null;}if(fgPushRef.current){clearInterval(fgPushRef.current);fgPushRef.current=null;}await stopBackgroundLocation();await authSignOut();await AsyncStorage.clear();setAuthUser(null);setSetupDone(false);setUserName("");setUserRole("driver");setUserId("");setShortId("");setRoutePoints([]);setTotalDistKm(0);setElapsedSec(0);setAlerts([]);setTrips([]);}}]);};
 
   return(
     <SafeAreaView style={styles.container}>
       <StatusBar style="light"/>
       <InAppBanner notifs={inAppNotifs} dismiss={(id)=>setInAppNotifs(prev=>prev.filter(n=>n.id!==id))}/>
       <View style={{flex:1}}>
-        {activeTab==="home"&&<HomeScreen tracking={{isTracking,toggle:startTracking,speed,status,coords:location,route:routePoints,distanceKm:totalDistKm,durationSec:elapsedSec}} driverName={userName} onResetDevice={resetDevice} onStartTracking={startTracking} onStopTracking={stopTracking}/>}
+        {activeTab==="home"&&userRole==="guardian"&&<ShareScreen userId={userId} shortId={shortId} userName={userName} userRole={userRole} isTracking={isTracking} latestLocation={location} speed={speed} status={status} supabaseReady={supabaseReady} pushToken={pushToken} notificationsReady={notificationsReady} watchCodeInput={watchCodeInput} setWatchCodeInput={setWatchCodeInput} watchedDriver={watchedDriver} watchError={watchError} watchBusy={watchBusy} startWatching={startWatching} stopWatching={stopWatching}/>}
+        {activeTab==="home"&&userRole==="driver"&&<HomeScreen tracking={{isTracking,toggle:startTracking,speed,status,coords:location,route:routePoints,distanceKm:totalDistKm,durationSec:elapsedSec}} driverName={userName} onSignOut={handleSignOut} onStartTracking={startTracking} onStopTracking={stopTracking}/>}
         {activeTab==="alerts"&&<AlertsScreen alerts={watchedDriver?watchedAlerts:alerts} watchedName={watchedDriver?.name||userName}/>}
         {activeTab==="history"&&<HistoryScreen trips={watchedDriver?watchedTrips:trips} liveRoute={watchedDriver?(Array.isArray(watchedDriver.route_points)?watchedDriver.route_points:[]):routePoints} isTracking={watchedDriver?!!watchedDriver.tracking_active:isTracking} watchedName={watchedDriver?.name||""} elapsedSecLive={watchedDriver?(Array.isArray(watchedDriver.route_points)?Math.max(0,(watchedDriver.route_points.length-1)*5):0):elapsedSec}/>}
         {activeTab==="report"&&<ReportScreen trips={watchedDriver?watchedTrips:trips} alerts={watchedDriver?watchedAlerts:alerts} watchedName={watchedDriver?.name||""}/>}
