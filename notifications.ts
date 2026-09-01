@@ -1,4 +1,5 @@
 import { supabase } from "./supabase";
+import { CONFIG } from "./config";
 
 // ---------- SEND EXPO PUSH ----------
 export async function sendExpoPush(
@@ -98,7 +99,7 @@ export async function notifyGuardiansSpeedAlert(
   await sendExpoPush(
     tokens,
     "⚠️ Speed Alert",
-    `${driverName} is going ${speed} km/h — above the ${60} km/h limit!`,
+      `${driverName} is going ${speed} km/h — above the ${CONFIG.SPEED_LIMIT} km/h limit!`,
     { type: "speed_alert", driverId, speed }
   );
 }
@@ -113,7 +114,7 @@ export async function notifyGuardiansSpeedNormal(
   await sendExpoPush(
     tokens,
     "✅ Speed Normal",
-    `${driverName}'s speed is back below 60 km/h (${speed} km/h).`,
+      `${driverName}'s speed is back below ${CONFIG.SPEED_LIMIT} km/h (${speed} km/h).`,
     { type: "speed_normal", driverId, speed }
   );
 }
