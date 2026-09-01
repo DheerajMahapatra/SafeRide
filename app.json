@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "SafeRide",
-    "slug": "saferide",
+    "slug": "ridhee",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -35,7 +35,12 @@
         "FOREGROUND_SERVICE_LOCATION",
         "POST_NOTIFICATIONS",
         "RECEIVE_BOOT_COMPLETED",
-        "WAKE_LOCK"
+        "WAKE_LOCK",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_LOCATION"
       ]
     },
     "web": {
@@ -63,8 +68,9 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "3be12de2-5504-4786-a431-0363096d6b61"
+        "projectId": "edf0e365-ddee-46e5-b0c1-4ef802d1806e"
       }
-    }
+    },
+    "owner": "dheeraj2029s-team"
   }
 }
